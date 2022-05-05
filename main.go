@@ -32,9 +32,28 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a, err := dbRows(`SELECT * FROM projects`)
+	projectSlug := ""
+	projects, err := dbRows(`select * from projects where slug = ?`, projectSlug)
 	check(err)
-	fmt.Fprintf(w, "Hello, %#v", a)
+	if len(projects) != 1 {
+		w.WriteHeader(404)
+		w.Write([]byte(`Project Not Found`))
+		return
+	}
+
+	projectId := projects[0]["id"].(string)
+	pages, err := dbRows(`select * from pages where project_id = ?`, projectId)
+	check(err)
+
+	for _, page := range pages {
+		if page["name"].(string) == r.URL.Path[1:] {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(page["content"].(string)))
+			return
+		}
+	}
+
+	w.Write([]byte(`Page Not Found`))
 }
 
 func handlerEdit(w http.ResponseWriter, r *http.Request) {

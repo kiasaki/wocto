@@ -14,10 +14,12 @@ Provides:
 
 ### steps
 
-- [ ] webserver
-- [ ] add/edit a page (of core editor)
-- [ ] render page
+- [x] webserver
+- [x] add/edit a page (of core editor)
+- [x] render page
 - [ ] add lua scripting
+- [ ] add scripting utils for http
+- [ ] add scripting utils for database
 - [ ] add authentication
 - [ ] add creating a new project
 - [ ] support for upload files
