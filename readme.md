@@ -17,7 +17,7 @@ Provides:
 - [x] webserver
 - [x] add/edit a page (of core editor)
 - [x] render page
-- [ ] add lua scripting
+- [x] add lua scripting
 - [ ] add scripting utils for http
 - [ ] add scripting utils for database
 - [ ] add authentication

@@ -9,7 +9,9 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 
+	"github.com/Shopify/go-lua"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -52,8 +54,21 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	for _, page := range pages {
 		if page["name"].(string) == r.URL.Path[1:] {
-			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(page["content"].(string)))
+			l := luaNewState(projectId, r, w)
+			t := templateToLua(page["content"].(string))
+			err := lua.DoString(l, t)
+			if err != nil {
+				w.WriteHeader(500)
+				fmt.Fprintf(w, "Error executing page: %v\n%s", err, t)
+				return
+			}
+			s, ok := l.ToString(-1)
+			if ok {
+				w.Header().Set("Content-Type", "text/html")
+				w.Write([]byte(s))
+			} else {
+				fmt.Fprintf(w, "Error no content")
+			}
 			return
 		}
 	}
@@ -232,4 +247,64 @@ func dbRows(sql string, args ...interface{}) ([]map[string]interface{}, error) {
 		results = append(results, result)
 	}
 	return results, r.Err()
+}
+
+func templateToLua(t string) string {
+	code := `__html = ""
+function _h(t)
+  __html = __html .. tostring(t)
+end
+`
+
+	lastI := 0
+	inCode := false
+	inOutput := false
+	for i, c := range t {
+		if c == '{' && i > 0 && t[i-1] == '{' {
+			code += `_h(` + strconv.Quote(t[lastI:i-1]) + ")\n"
+			lastI = i + 1
+			inOutput = true
+		}
+		if inOutput && c == '}' && t[i-1] == '}' {
+			code += `_h(` + t[lastI:i-1] + ")\n"
+			lastI = i + 1
+			inOutput = false
+		}
+		if c == '%' && i > 0 && t[i-1] == '{' {
+			code += `_h(` + strconv.Quote(t[lastI:i-1]) + ")\n"
+			lastI = i + 1
+			inCode = true
+		}
+		if inCode && c == '}' && t[i-1] == '%' {
+			code += t[lastI:i-1] + "\n"
+			lastI = i + 1
+			inCode = false
+		}
+	}
+	code += `_h(` + strconv.Quote(t[lastI:]) + ")\n"
+
+	code += "return __html"
+	return code
+}
+
+func luaNewState(projectId string, r *http.Request, w http.ResponseWriter) *lua.State {
+	l := lua.NewState()
+	libs := []lua.RegistryFunction{
+		{"_G", lua.BaseOpen},
+		{"table", lua.TableOpen},
+		{"string", lua.StringOpen},
+		{"bit32", lua.Bit32Open},
+		{"math", lua.MathOpen},
+	}
+	for _, lib := range libs {
+		lua.Require(l, lib.Name, lib.Function, true)
+		l.Pop(1)
+	}
+
+	l.Register("param", func(l *lua.State) int {
+		name := lua.CheckString(l, 1)
+		l.PushString(r.URL.Query().Get(name))
+		return 1
+	})
+	return l
 }

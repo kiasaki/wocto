@@ -1,2 +1,4 @@
+github.com/Shopify/go-lua v0.0.0-20220120202609-9ab779377807 h1:b10jUZ94GuJk5GBl0iElM5aGIPPHi7FTRvqOKA7Ku+s=
+github.com/Shopify/go-lua v0.0.0-20220120202609-9ab779377807/go.mod h1:1cxA/QL5xgRGP7Crq6tXSOY4eo//me8GHGMyypHynM8=
 github.com/mattn/go-sqlite3 v1.14.12 h1:TJ1bhYJPV44phC+IMu1u2K/i5RriLTPe+yc68XDJ1Z0=
 github.com/mattn/go-sqlite3 v1.14.12/go.mod h1:NyWgC/yNuGj7Q9rpYnZvas74GogHl5/Z4A/KQRfk6bU=
