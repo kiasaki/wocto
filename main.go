@@ -3,12 +3,17 @@ package main
 import (
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+type M = map[string]interface{}
 
 var db *sql.DB
 
@@ -20,11 +25,7 @@ func main() {
 	check(err)
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS data_project_id ON data (project_id, entity);`)
 	check(err)
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS projects (id primary key, name, slug, user_id);`)
-	check(err)
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS pages (id primary key, name, project_id, content);`)
-	check(err)
-	_, err = db.Exec(`INSERT INTO projects VALUES ('1', 'Wocto', '', '1') ON CONFLICT (id) DO NOTHING;`)
+	_, err = db.Exec(`INSERT INTO data VALUES ('1', '1', 'projects', '{"id":"1","name":"Wocto","slug":"","owner_id":"1"}') ON CONFLICT (id) DO NOTHING;`)
 	check(err)
 	log.Println("Starting on port 8080")
 	log.Fatal(http.ListenAndServe(":8080", http.HandlerFunc(handler)))
@@ -37,7 +38,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projectSlug := ""
-	projects, err := dbRows(`select * from projects where slug = ?`, projectSlug)
+	projects, err := dbEntitiesWhere("1", "projects", "slug", "=", projectSlug, "", 0, 0)
 	check(err)
 	if len(projects) != 1 {
 		w.WriteHeader(404)
@@ -46,7 +47,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projectId := projects[0]["id"].(string)
-	pages, err := dbRows(`select * from pages where project_id = ?`, projectId)
+	pages, err := dbEntitiesWhere("1", "pages", "project_id", "=", projectId, "", 0, 0)
 	check(err)
 
 	for _, page := range pages {
@@ -62,35 +63,34 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 func handlerEdit(w http.ResponseWriter, r *http.Request) {
 	// setup
-	pages, err := dbRows(`SELECT * FROM pages where project_id = '1'`)
+	pages, err := dbEntitiesWhere("1", "pages", "project_id", "=", "1", "", 0, 0)
 	check(err)
 
 	id := r.URL.Query().Get("page")
 	var page map[string]interface{}
-	name := `test`
-	content := "test\n\ncontent"
 	for _, p := range pages {
 		if p["id"].(string) == id {
 			page = p
-			name = p["name"].(string)
-			content = p["content"].(string)
 		}
 	}
 
 	// updates
 	if id == "new" {
 		id := uuid()
-		check(dbExec(`INSERT INTO pages VALUES (?, ?, ?, ?)`, id, "newpage", "1", ""))
+		check(dbPut("1", "pages", M{
+			"id":         id,
+			"project_id": "1",
+			"name":       "newpage",
+			"content":    "",
+		}))
 		http.Redirect(w, r, "/iedit?page="+id, 302)
 		return
 	}
 
-	log.Println(r.Method, r.FormValue("name"))
 	if r.Method == "POST" {
-		name = r.FormValue("name")
-		content = r.FormValue("content")
-		page["name"] = name
-		check(dbExec(`UPDATE pages SET name = ?, content = ? WHERE id = ?`, name, content, id))
+		page["name"] = r.FormValue("name")
+		page["content"] = r.FormValue("content")
+		dbPut("1", "pages", page)
 	}
 
 	// render
@@ -102,7 +102,8 @@ func handlerEdit(w http.ResponseWriter, r *http.Request) {
 
 	html += `<div><a href="?page=new">New Page</a></div>`
 
-	html += fmt.Sprintf(`
+	if page != nil {
+		html += fmt.Sprintf(`
   <div><input name="name" value="%s" /></div>
   <div><textarea name="content" rows="40">%s</textarea></div>
   <div><button type="submit">Save</button></div>
@@ -111,7 +112,8 @@ func handlerEdit(w http.ResponseWriter, r *http.Request) {
   input, textarea { width: 100%%; margin: 8px 0; }
   </style>
   </form>
-  `, name, content)
+  `, page["name"], page["content"])
+	}
 
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(html))
@@ -130,6 +132,74 @@ func uuid() string {
 	return fmt.Sprintf("%X-%X-%X-%X-%X", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
+func dbEntity(projectId string, entityName string, id string) (M, error) {
+	r, err := dbRows(`select * from data where project_id = ? and entity = ? and id = ?`,
+		projectId, entityName, id)
+	if len(r) > 1 {
+		return r[0], err
+	}
+	return nil, err
+}
+
+func dbEntities(projectId string, entityName string) ([]M, error) {
+	return dbRows(`select * from data where project_id = ? and entity = ?`, projectId, entityName)
+}
+
+func dbEntitiesWhere(projectId string, entityName string, whereField string, whereOp string, whereValue interface{}, orderBy string, limit, offset int) ([]M, error) {
+	args := []interface{}{projectId, entityName}
+	sql := `select * from data where project_id = ? and entity = ?`
+	if whereField != "" {
+		if !regexp.MustCompile("^[a-zA-Z0-9_]+$").MatchString(whereField) {
+			return nil, errors.New("dbEntitiesWhere: whereField invalid: " + whereField)
+		}
+		if !regexp.MustCompile("^[=<>!]+$").MatchString(whereOp) {
+			return nil, errors.New("dbEntitiesWhere: whereOp invalid: " + whereOp)
+		}
+		sql += fmt.Sprintf(" and json_extract(data, '%s') %s ?", "$."+whereField, whereOp)
+		args = append(args, whereValue)
+	}
+	if orderBy != "" {
+		dir := "asc"
+		if orderBy[0] == '-' {
+			dir = "desc"
+			orderBy = orderBy[1:]
+		}
+		sql += " order by json_extract(data, ?) " + dir
+		args = append(args, "$."+orderBy)
+	}
+	if limit > 0 {
+		sql += " limit ?"
+		args = append(args, limit)
+	}
+	if offset > 0 {
+		sql += " offset ?"
+		args = append(args, offset)
+	}
+	rows, err := dbRows(sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	entities := []M{}
+	for _, r := range rows {
+		e := M{}
+		err := json.Unmarshal([]byte(r["data"].(string)), &e)
+		if err != nil {
+			return nil, err
+		}
+		entities = append(entities, e)
+	}
+	return entities, nil
+}
+
+func dbPut(projectId string, entityName string, entity M) error {
+	b, err := json.Marshal(entity)
+	if err != nil {
+		return err
+	}
+	return dbExec(`insert into data (id, project_id, entity, data) VALUES (?, ? ,?, ?) on conflict (id) do update set data = excluded.data`,
+		entity["id"].(string), projectId, entityName, string(b))
+}
+
 func dbExec(sql string, args ...interface{}) error {
 	_, err := db.Exec(sql, args...)
 	return err
@@ -140,7 +210,7 @@ func dbRows(sql string, args ...interface{}) ([]map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	results := []map[string]interface{}{}
+	results := []M{}
 	columns, err := r.Columns()
 	if err != nil {
 		return nil, err
@@ -155,7 +225,7 @@ func dbRows(sql string, args ...interface{}) ([]map[string]interface{}, error) {
 			return nil, err
 		}
 
-		result := map[string]interface{}{}
+		result := M{}
 		for i, column := range columns {
 			result[column] = *(values[i].(*interface{}))
 		}
