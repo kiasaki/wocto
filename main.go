@@ -16,6 +16,10 @@ func main() {
 	var err error
 	db, err = sql.Open("sqlite3", "data.sqlite3")
 	check(err)
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS data (id primary key, project_id, entity, data);`)
+	check(err)
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS data_project_id ON data (project_id, entity);`)
+	check(err)
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS projects (id primary key, name, slug, user_id);`)
 	check(err)
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS pages (id primary key, name, project_id, content);`)
