@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"log"
@@ -26,15 +27,89 @@ func main() {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/iedit" {
+		handlerEdit(w, r)
+		return
+	}
+
 	a, err := dbRows(`SELECT * FROM projects`)
 	check(err)
 	fmt.Fprintf(w, "Hello, %#v", a)
+}
+
+func handlerEdit(w http.ResponseWriter, r *http.Request) {
+	// setup
+	pages, err := dbRows(`SELECT * FROM pages where project_id = '1'`)
+	check(err)
+
+	id := r.URL.Query().Get("page")
+	var page map[string]interface{}
+	name := `test`
+	content := "test\n\ncontent"
+	for _, p := range pages {
+		if p["id"].(string) == id {
+			page = p
+			name = p["name"].(string)
+			content = p["content"].(string)
+		}
+	}
+
+	// updates
+	if id == "new" {
+		id := uuid()
+		check(dbExec(`INSERT INTO pages VALUES (?, ?, ?, ?)`, id, "newpage", "1", ""))
+		http.Redirect(w, r, "/iedit?page="+id, 302)
+		return
+	}
+
+	log.Println(r.Method, r.FormValue("name"))
+	if r.Method == "POST" {
+		name = r.FormValue("name")
+		content = r.FormValue("content")
+		page["name"] = name
+		check(dbExec(`UPDATE pages SET name = ?, content = ? WHERE id = ?`, name, content, id))
+	}
+
+	// render
+	html := `<form method="post">`
+
+	for _, page := range pages {
+		html += fmt.Sprintf(`<div><a href="?page=%s">%s</a></div>`, page["id"], page["name"])
+	}
+
+	html += `<div><a href="?page=new">New Page</a></div>`
+
+	html += fmt.Sprintf(`
+  <div><input name="name" value="%s" /></div>
+  <div><textarea name="content" rows="40">%s</textarea></div>
+  <div><button type="submit">Save</button></div>
+  <style>
+  html { font-family: monospace; font-size: 16px; }
+  input, textarea { width: 100%%; margin: 8px 0; }
+  </style>
+  </form>
+  `, name, content)
+
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(html))
 }
 
 func check(err error) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func uuid() string {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	check(err)
+	return fmt.Sprintf("%X-%X-%X-%X-%X", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+func dbExec(sql string, args ...interface{}) error {
+	_, err := db.Exec(sql, args...)
+	return err
 }
 
 func dbRows(sql string, args ...interface{}) ([]map[string]interface{}, error) {
