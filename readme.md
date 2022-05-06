@@ -18,8 +18,19 @@ Provides:
 - [x] add/edit a page (of core editor)
 - [x] render page
 - [x] add lua scripting
-- [ ] add scripting utils for http
-- [ ] add scripting utils for database
+- [ ] add scripting utils
+  - [ ] uuid
+  - [ ] method
+  - [x] param
+  - [ ] redirect
+  - [ ] cookiesGet
+  - [ ] cookiesSet
+  - [ ] cryptoHash
+  - [ ] cryptoCompare
+  - [ ] jwtSign
+  - [ ] jwtVerify
+  - [ ] dbWhere
+  - [ ] dbPut
 - [ ] add authentication
 - [ ] add creating a new project
 - [ ] support for upload files

@@ -112,7 +112,7 @@ func handlerEdit(w http.ResponseWriter, r *http.Request) {
 	html := `<form method="post">`
 
 	for _, page := range pages {
-		html += fmt.Sprintf(`<div><a href="?page=%s">%s</a></div>`, page["id"], page["name"])
+		html += fmt.Sprintf(`<div><a href="?page=%s">/%s</a></div>`, page["id"], page["name"])
 	}
 
 	html += `<div><a href="?page=new">New Page</a></div>`
