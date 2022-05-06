@@ -19,18 +19,20 @@ Provides:
 - [x] render page
 - [x] add lua scripting
 - [ ] add scripting utils
-  - [ ] uuid
-  - [ ] method
+  - [x] uuid
+  - [x] method
   - [x] param
-  - [ ] redirect
-  - [ ] cookiesGet
-  - [ ] cookiesSet
-  - [ ] cryptoHash
-  - [ ] cryptoCompare
-  - [ ] jwtSign
-  - [ ] jwtVerify
-  - [ ] dbWhere
-  - [ ] dbPut
+  - [x] redirect
+  - [x] jsonParse
+  - [x] jsonStringify
+  - [x] cookiesGet
+  - [x] cookiesSet
+  - [x] cryptoHash
+  - [x] cryptoCompare
+  - [x] jwtSign
+  - [x] jwtVerify
+  - [x] dbWhere
+  - [x] dbPut
 - [ ] add authentication
 - [ ] add creating a new project
 - [ ] support for upload files
