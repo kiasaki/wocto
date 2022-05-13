@@ -24,6 +24,157 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const appCode = `
+<title>Wocto</title>
+<style>
+:root { --primary: #8B5CF6; }
+html, body { margin: 0; font-family: sans-serif; font-size: 16px; }
+a { color: var(--primary); }
+container { display: block; max-width: 960px; padding: 32px; margin: 0 auto; }
+h1 { margin-top: 0; }
+label { display: block; margin: 0 0 4px; }
+input, textarea { margin: 0 0 16px; padding: 8px 12px; border: 2px solid #111; }
+input, textarea { font-size: 16px; font-family: sans-serif; }
+button, .button { display: inline-block; background: var(--primary); color: #fff; }
+button, .button { padding: 12px 12px; border: 0; }
+button:hover, .button:hover { opacity: 0.9; cursor: pointer; }
+form input, form button { width: 100%; }
+error { display: block; margin-bottom: 16px; }
+error { padding: 16px; color: #B91C1C; background: #FEF2F2; }
+pre { overflow-x: auto; }
+hstack { display: flex; }
+vstack { display: flex; flex-direction: column; }
+spacer { display: block; flex: 1; }
+space { display: inline-block; width: 16px; height: 16px; }
+</style>
+<container>
+<%
+dbQuery("create table if not exists users (id primary key, username, password)")
+dbQuery("create table if not exists projects (id primary key, name, slug, domain, user_id)")
+dbQuery("create table if not exists pages (id primary key, name, content, project_id)")
+
+function eq(a) { return function(b) { return a === b; }; }
+function prop(a) { return function(b) { return b[a]; }; }
+function comp(a, b) { return function(c) { return a(b(c)); }; }
+
+secret = "keyboardcat"
+error = ""
+user = null
+token = cookiesGet("token")
+if (token) {
+  payload = jwtVerify(secret, token)
+  if (payload) {
+    user = dbQuery("select * from users where id = ?", payload.id)[0]
+  }
+}
+
+if (!user) {
+  if (method === "POST") {
+    user = dbQuery("select * from users where username = ?", param("username"))[0]
+    if (user) {
+      if (cryptoCompare(user.password, param("password"))) {
+        token = jwtSign(secret, {"id": user.id}, 7*24*60)
+        cookiesSet("token", token)
+        redirect(path)
+      } else {
+        error = "Wrong password"
+      }
+    } else {
+      id = uuid()
+      dbQuery("insert into users values (?,?,?)",
+        id, param("username"), cryptoHash(param("password")))
+      token = jwtSign(secret, {"id": id}, 7*24*60)
+      cookiesSet("token", token)
+      redirect(path)
+    }
+  }
+%>
+<form method="post" style="max-width:360px;margin:0 auto;">
+  <h1>Login / Signup</h1>
+  <% if (error) { %><error><? error ?></error><% } %>
+  <div>
+    <label>Username</label>
+    <input type="text" name="username" value="<? param("username") ?>" autofocus />
+  </div>
+  <div>
+    <label>Password</label>
+    <input type="password" name="password" />
+  </div>
+  <button type="submit">Login / Signup</button>
+</form>
+<%
+} else {
+%>
+<hstack>
+  <a href="/projects">Projects</a>
+  <spacer></spacer>
+  <a href="/profile"><? user.username ?></a>
+</hstack>
+<space></space>
+<%
+}
+
+if (path === "/logout") {
+  setCookie("token", "")
+  redirect("/")
+}
+
+if (path === "/profile") {
+  %><h1>Profile</h1>
+  <a href="/logout">Logout</a>
+<% }
+
+if (path === "/projects-new") {
+  id = uuid()
+  dbQuery("insert into projects values (?,?,?,?,?)", id, "New Project", id, "", user.id)
+  redirect("/projects-view?id="+id)
+}
+
+if (path === "/projects-pages-new") {
+  project = dbQuery("select * from projects where id = ? and user_id = ?",
+    param("id"), user.id)[0]
+  if (!project) { write("Page not found"); end() }
+}
+
+if (path === "/projects-view") {
+  project = dbQuery("select * from projects where id = ? and user_id = ?",
+    param("id"), user.id)[0]
+  if (!project) { write("Page not found"); end() }
+  pages = dbQuery("select * from pages where project_id = ?", project.id)
+  page = pages.find(comp(eq(param("page")), prop("id")))
+  %>
+  <h1><? project.name ?></h1>
+  <hstack>
+    <div style="flex: 0 0 320px">
+      %>pages.forEach(function(p) {<%
+        <div>
+          <a href="/projects-view?id=<? project.id ?>&page=<? p.id ?>">/<? p.name ?></a>
+        </div>
+      %>})<%
+    </div>
+    <spacer>
+      %>if (page) {<%
+      <form method="post">
+        <input type="text" name="name" />
+        <textarea name="content" autofocus><? page.content ?>
+      </form>
+      %>}<%
+    </spacer>
+  </hstack>
+<% }
+
+if (path === "/") {
+  projects = dbQuery("select * from projects where user_id = ?", user.id)
+  %><h1>Projects</h1>
+  <a href="/projects-new">New Project</a>
+  <%projects.map(function(p) {%>
+    <div>
+      <a href="/projects-view?id=<? p.id ?>"><? p.name ?></a>
+    </div>
+  <%})%>
+<% }
+%></container>`
+
 type M = map[string]interface{}
 
 type Project struct {
@@ -86,7 +237,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		t := templateToCode(page["content"].(string))
 		_, err := rt.runtime.RunScript(page["name"].(string), t)
 		if err != nil {
-			if err.Error() == "request end" {
+			if strings.Contains(err.Error(), "request end") {
 				return
 			}
 			w.WriteHeader(500)
@@ -130,53 +281,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(rt.out))
 }
 
-const appCode = `{%
-dbQuery("create table if not exists users (id primary key, username, password)")
-dbQuery("create table if not exists projects (id primary key, name, slug, user_id)")
-dbQuery("create table if not exists pages (id primary key, name, content, project_id)")
-
-function eq(a) { return function(b) { return a === b; }; }
-function prop(a) { return function(b) { return b[a]; }; }
-function comp(a, b) { return function(c) { return a(b(c)); }; }
-
-projectId = "1"
-pages = dbQuery("select * from pages where project_id = ? order by name", projectId)
-
-id = param("page")
-page = pages.find(comp(eq(id), prop("id")))
-
-if (id === "new") {
-  id = uuid()
-  dbQuery("insert into pages values (?,?,?,?)", id, "newpage", "", projectId)
-  redirect("/edit?page=" + id)
-}
-
-if (method === "POST") {
-  page.name = param("name")
-  page.content = param("content")
-  dbQuery("update pages set name = ?, content = ? where id = ?", page.name, page.content, projectId)
-}
-%}
-<form method="post">
-{% pages.forEach(function(p) { %}
-  <div><a href="/edit?page={{p.id}}">/{{p.name}}</a></div>
-{% }) %}
-<div><a href="?page=new">New Page</a></div>
-
-{% if (page) { %}
-  <div><button type="submit">Save</button></div>
-  <div><input name="name" value="{{page.name}}" /></div>
-  <div><textarea name="content">{{page.content}}</textarea></div>
-{% } %}
-
-<style>
-html { font-family: monospace; font-size: 16px; }
-input, textarea { width: 100%; margin: 8px 0; }
-textarea { height: calc(100vh - 200px); }
-</style>
-</form>
-`
-
 type Runtime struct {
 	projectId string
 	pages     []M
@@ -192,6 +296,7 @@ func NewRuntime(projectId string, pages []M, r *http.Request, w http.ResponseWri
 	runtime := &Runtime{projectId: projectId, pages: pages, r: r, w: w, runtime: rt}
 	runtime.db = dbInstance(projectId)
 	global := rt.GlobalObject()
+	global.Set("path", rt.ToValue(r.URL.Path))
 	global.Set("method", rt.ToValue(r.Method))
 	global.Set("include", runtime.fnInclude)
 	global.Set("uuid", runtime.fnUuid)
@@ -199,6 +304,7 @@ func NewRuntime(projectId string, pages []M, r *http.Request, w http.ResponseWri
 	global.Set("sanitize", runtime.fnSanitize)
 	global.Set("write", runtime.fnWrite)
 	global.Set("redirect", runtime.fnRedirect)
+	global.Set("end", runtime.fnEnd)
 	global.Set("cookiesGet", runtime.fnCookiesGet)
 	global.Set("cookiesSet", runtime.fnCookiesSet)
 	global.Set("jsonParse", runtime.fnJsonParse)
@@ -248,7 +354,13 @@ func (r *Runtime) fnWrite(call goja.FunctionCall) goja.Value {
 func (r *Runtime) fnRedirect(call goja.FunctionCall) goja.Value {
 	path := call.Arguments[0].Export().(string)
 	http.Redirect(r.w, r.r, path, 302)
-	panic(errors.New("request end"))
+	r.runtime.Interrupt(errors.New("request end"))
+	return goja.Undefined()
+}
+
+func (r *Runtime) fnEnd(call goja.FunctionCall) goja.Value {
+	r.runtime.Interrupt(errors.New("request end"))
+	return goja.Undefined()
 }
 
 func (r *Runtime) fnCookiesGet(call goja.FunctionCall) goja.Value {
@@ -436,22 +548,22 @@ func templateToCode(t string) string {
 	inCode := false
 	inOutput := false
 	for i, c := range t {
-		if c == '{' && i > 0 && t[i-1] == '{' {
+		if i > 0 && t[i-1] == '<' && c == '?' {
 			code += `write(` + strconv.Quote(t[lastI:i-1]) + ")\n"
 			lastI = i + 1
 			inOutput = true
 		}
-		if inOutput && c == '}' && t[i-1] == '}' {
+		if inOutput && t[i-1] == '?' && c == '>' {
 			code += `write(sanitize(` + t[lastI:i-1] + "))\n"
 			lastI = i + 1
 			inOutput = false
 		}
-		if c == '%' && i > 0 && t[i-1] == '{' {
+		if c == '%' && i > 0 && t[i-1] == '<' {
 			code += `write(` + strconv.Quote(t[lastI:i-1]) + ")\n"
 			lastI = i + 1
 			inCode = true
 		}
-		if inCode && c == '}' && t[i-1] == '%' {
+		if inCode && c == '>' && t[i-1] == '%' {
 			code += t[lastI:i-1] + "\n"
 			lastI = i + 1
 			inCode = false
@@ -475,11 +587,11 @@ func uuid() string {
 }
 
 func stringToBase64(s string) string {
-	return base64.URLEncoding.EncodeToString([]byte(s))
+	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(s))
 }
 
 func base64ToString(b string) string {
-	if s, err := base64.URLEncoding.DecodeString(b); err == nil {
+	if s, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(b); err == nil {
 		return string(s)
 	}
 	return ""
