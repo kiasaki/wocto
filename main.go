@@ -5,13 +5,16 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -24,156 +27,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const appCode = `
-<title>Wocto</title>
-<style>
-:root { --primary: #8B5CF6; }
-html, body { margin: 0; font-family: sans-serif; font-size: 16px; }
-a { color: var(--primary); }
-container { display: block; max-width: 960px; padding: 32px; margin: 0 auto; }
-h1 { margin-top: 0; }
-label { display: block; margin: 0 0 4px; }
-input, textarea { margin: 0 0 16px; padding: 8px 12px; border: 2px solid #111; }
-input, textarea { font-size: 16px; font-family: sans-serif; }
-button, .button { display: inline-block; background: var(--primary); color: #fff; }
-button, .button { padding: 12px 12px; border: 0; }
-button:hover, .button:hover { opacity: 0.9; cursor: pointer; }
-form input, form button { width: 100%; }
-error { display: block; margin-bottom: 16px; }
-error { padding: 16px; color: #B91C1C; background: #FEF2F2; }
-pre { overflow-x: auto; }
-hstack { display: flex; }
-vstack { display: flex; flex-direction: column; }
-spacer { display: block; flex: 1; }
-space { display: inline-block; width: 16px; height: 16px; }
-</style>
-<container>
-<%
-dbQuery("create table if not exists users (id primary key, username, password)")
-dbQuery("create table if not exists projects (id primary key, name, slug, domain, user_id)")
-dbQuery("create table if not exists pages (id primary key, name, content, project_id)")
-
-function eq(a) { return function(b) { return a === b; }; }
-function prop(a) { return function(b) { return b[a]; }; }
-function comp(a, b) { return function(c) { return a(b(c)); }; }
-
-secret = "keyboardcat"
-error = ""
-user = null
-token = cookiesGet("token")
-if (token) {
-  payload = jwtVerify(secret, token)
-  if (payload) {
-    user = dbQuery("select * from users where id = ?", payload.id)[0]
-  }
-}
-
-if (!user) {
-  if (method === "POST") {
-    user = dbQuery("select * from users where username = ?", param("username"))[0]
-    if (user) {
-      if (cryptoCompare(user.password, param("password"))) {
-        token = jwtSign(secret, {"id": user.id}, 7*24*60)
-        cookiesSet("token", token)
-        redirect(path)
-      } else {
-        error = "Wrong password"
-      }
-    } else {
-      id = uuid()
-      dbQuery("insert into users values (?,?,?)",
-        id, param("username"), cryptoHash(param("password")))
-      token = jwtSign(secret, {"id": id}, 7*24*60)
-      cookiesSet("token", token)
-      redirect(path)
-    }
-  }
-%>
-<form method="post" style="max-width:360px;margin:0 auto;">
-  <h1>Login / Signup</h1>
-  <% if (error) { %><error><? error ?></error><% } %>
-  <div>
-    <label>Username</label>
-    <input type="text" name="username" value="<? param("username") ?>" autofocus />
-  </div>
-  <div>
-    <label>Password</label>
-    <input type="password" name="password" />
-  </div>
-  <button type="submit">Login / Signup</button>
-</form>
-<%
-} else {
-%>
-<hstack>
-  <a href="/projects">Projects</a>
-  <spacer></spacer>
-  <a href="/profile"><? user.username ?></a>
-</hstack>
-<space></space>
-<%
-}
-
-if (path === "/logout") {
-  setCookie("token", "")
-  redirect("/")
-}
-
-if (path === "/profile") {
-  %><h1>Profile</h1>
-  <a href="/logout">Logout</a>
-<% }
-
-if (path === "/projects-new") {
-  id = uuid()
-  dbQuery("insert into projects values (?,?,?,?,?)", id, "New Project", id, "", user.id)
-  redirect("/projects-view?id="+id)
-}
-
-if (path === "/projects-pages-new") {
-  project = dbQuery("select * from projects where id = ? and user_id = ?",
-    param("id"), user.id)[0]
-  if (!project) { write("Page not found"); end() }
-}
-
-if (path === "/projects-view") {
-  project = dbQuery("select * from projects where id = ? and user_id = ?",
-    param("id"), user.id)[0]
-  if (!project) { write("Page not found"); end() }
-  pages = dbQuery("select * from pages where project_id = ?", project.id)
-  page = pages.find(comp(eq(param("page")), prop("id")))
-  %>
-  <h1><? project.name ?></h1>
-  <hstack>
-    <div style="flex: 0 0 320px">
-      %>pages.forEach(function(p) {<%
-        <div>
-          <a href="/projects-view?id=<? project.id ?>&page=<? p.id ?>">/<? p.name ?></a>
-        </div>
-      %>})<%
-    </div>
-    <spacer>
-      %>if (page) {<%
-      <form method="post">
-        <input type="text" name="name" />
-        <textarea name="content" autofocus><? page.content ?>
-      </form>
-      %>}<%
-    </spacer>
-  </hstack>
-<% }
-
-if (path === "/") {
-  projects = dbQuery("select * from projects where user_id = ?", user.id)
-  %><h1>Projects</h1>
-  <a href="/projects-new">New Project</a>
-  <%projects.map(function(p) {%>
-    <div>
-      <a href="/projects-view?id=<? p.id ?>"><? p.name ?></a>
-    </div>
-  <%})%>
-<% }
-%></container>`
+//go:embed app.php
+var appCode string
 
 type M = map[string]interface{}
 
@@ -192,33 +47,60 @@ var projects = map[string]*Project{}
 func main() {
 	projects[""] = &Project{ID: "1", Pages: []M{
 		M{"name": "404", "content": appCode}}}
-	log.Println("Starting on port 8080")
-	log.Fatal(http.ListenAndServe(":8080", http.HandlerFunc(handler)))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Println("Starting on port " + port)
+	log.Fatal(http.ListenAndServe(":"+port, http.HandlerFunc(handler)))
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if err := recover(); err != nil {
+			if e, ok := err.(string); ok && e == "request end" {
+				return
+			}
 			log.Println("panic: ", err)
 			log.Println(string(debug.Stack()))
+			w.WriteHeader(500)
+			fmt.Fprintf(w, "panic: %v\n", err)
 		}
 	}()
 
 	db := dbInstance("1")
 	projectSlug := ""
+
+	if !strings.HasPrefix(r.Host, "wocto.atriumph") {
+		projectsByDomain, err := dbQuery(db, "select slug from projects where domain = ?", r.Host)
+		check(err)
+		if len(projectsByDomain) > 0 {
+			projectSlug = projectsByDomain[0]["slug"].(string)
+		}
+	}
+
+	if projectSlug == "" {
+		hostParts := strings.Split(r.Host, ".")
+		if len(hostParts) >= 3 {
+			if hostParts[len(hostParts)-3] != "wocto" && hostParts[len(hostParts)-2] == "atriumph" {
+				projectSlug = hostParts[len(hostParts)-3]
+			}
+		}
+	}
+
 	projectsLock.RLock()
 	project, ok := projects[projectSlug]
 	projectsLock.RUnlock()
 	if !ok {
 		matchingProjects, err := dbQuery(db,
-			"select * projects where slug = ?", projectSlug)
+			"select * from projects where slug = ?", projectSlug)
 		check(err)
 		if len(matchingProjects) != 1 {
 			w.WriteHeader(404)
 			w.Write([]byte(`Project Not Found`))
 			return
 		}
-		project := &Project{
+		project = &Project{
 			ID:   matchingProjects[0]["id"].(string),
 			Slug: matchingProjects[0]["slug"].(string),
 		}
@@ -241,8 +123,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			w.WriteHeader(500)
-			fmt.Fprintf(w, "Error executing page: %v\n%s", err, t)
-			return
+			fmt.Fprintf(w, "Error executing page: %v\n", err)
+			for i, l := range strings.Split(t, "\n") {
+				fmt.Fprintf(w, "%3d|%s\n", i+1, l)
+			}
+			panic("request end")
 		}
 	}
 	for _, page := range project.Pages {
@@ -271,12 +156,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		rt.out = "Page Not Found"
 	}
 
-	if strings.HasSuffix(r.URL.Path, ".css") {
-		w.Header().Set("Content-Type", "text/css")
-	} else if strings.HasSuffix(r.URL.Path, ".js") {
-		w.Header().Set("Content-Type", "application/javascript")
-	} else {
-		w.Header().Set("Content-Type", "text/html")
+	if w.Header().Get("Content-Type") == "" {
+		if strings.HasSuffix(r.URL.Path, ".css") {
+			w.Header().Set("Content-Type", "text/css")
+		} else if strings.HasSuffix(r.URL.Path, ".js") {
+			w.Header().Set("Content-Type", "application/javascript")
+		} else {
+			w.Header().Set("Content-Type", "text/html")
+		}
+	}
+	if rt.code != 0 {
+		w.WriteHeader(rt.code)
 	}
 	w.Write([]byte(rt.out))
 }
@@ -287,6 +177,7 @@ type Runtime struct {
 	r         *http.Request
 	w         http.ResponseWriter
 	db        *sql.DB
+	code      int
 	out       string
 	runtime   *goja.Runtime
 }
@@ -296,6 +187,9 @@ func NewRuntime(projectId string, pages []M, r *http.Request, w http.ResponseWri
 	runtime := &Runtime{projectId: projectId, pages: pages, r: r, w: w, runtime: rt}
 	runtime.db = dbInstance(projectId)
 	global := rt.GlobalObject()
+	if projectId == "1" {
+		global.Set("__secret", rt.ToValue(os.Getenv("SECRET")))
+	}
 	global.Set("path", rt.ToValue(r.URL.Path))
 	global.Set("method", rt.ToValue(r.Method))
 	global.Set("include", runtime.fnInclude)
@@ -305,15 +199,22 @@ func NewRuntime(projectId string, pages []M, r *http.Request, w http.ResponseWri
 	global.Set("write", runtime.fnWrite)
 	global.Set("redirect", runtime.fnRedirect)
 	global.Set("end", runtime.fnEnd)
+	global.Set("body", runtime.fnBody)
+	global.Set("responseCode", runtime.fnResponseCode)
+	global.Set("headersGet", runtime.fnHeadersGet)
+	global.Set("headersSet", runtime.fnHeadersSet)
 	global.Set("cookiesGet", runtime.fnCookiesGet)
 	global.Set("cookiesSet", runtime.fnCookiesSet)
-	global.Set("jsonParse", runtime.fnJsonParse)
-	global.Set("jsonStringify", runtime.fnJsonStringify)
+	global.Set("jsonDecode", runtime.fnJsonDecode)
+	global.Set("jsonEncode", runtime.fnJsonEncode)
+	global.Set("base64Decode", runtime.fnBase64Decode)
+	global.Set("base64Encode", runtime.fnBase64Encode)
 	global.Set("cryptoHash", runtime.fnCryptoHash)
 	global.Set("cryptoCompare", runtime.fnCryptoCompare)
 	global.Set("jwtSign", runtime.fnJwtSign)
 	global.Set("jwtVerify", runtime.fnJwtVerify)
 	global.Set("dbQuery", runtime.fnDbQuery)
+	global.Set("__clearCache", runtime.fnClearCache)
 	return runtime
 }
 
@@ -363,6 +264,31 @@ func (r *Runtime) fnEnd(call goja.FunctionCall) goja.Value {
 	return goja.Undefined()
 }
 
+func (r *Runtime) fnBody(call goja.FunctionCall) goja.Value {
+	defer r.r.Body.Close()
+	b, err := ioutil.ReadAll(r.r.Body)
+	checkR(r.runtime, err)
+	return r.runtime.ToValue(string(b))
+}
+
+func (r *Runtime) fnResponseCode(call goja.FunctionCall) goja.Value {
+	code := int(call.Arguments[0].ToInteger())
+	r.code = code
+	return goja.Undefined()
+}
+
+func (r *Runtime) fnHeadersGet(call goja.FunctionCall) goja.Value {
+	name := call.Arguments[0].Export().(string)
+	return r.runtime.ToValue(r.r.Header.Get(name))
+}
+
+func (r *Runtime) fnHeadersSet(call goja.FunctionCall) goja.Value {
+	name := call.Arguments[0].Export().(string)
+	value := call.Arguments[1].Export().(string)
+	r.w.Header().Set(name, value)
+	return goja.Undefined()
+}
+
 func (r *Runtime) fnCookiesGet(call goja.FunctionCall) goja.Value {
 	name := call.Arguments[0].Export().(string)
 	if cookie, err := r.r.Cookie(name); err == nil {
@@ -384,18 +310,30 @@ func (r *Runtime) fnCookiesSet(call goja.FunctionCall) goja.Value {
 	return goja.Undefined()
 }
 
-func (r *Runtime) fnJsonParse(call goja.FunctionCall) goja.Value {
+func (r *Runtime) fnJsonDecode(call goja.FunctionCall) goja.Value {
 	t := call.Arguments[0].Export().(string)
 	var v interface{}
 	check(json.Unmarshal([]byte(t), &v))
 	return r.runtime.ToValue(v)
 }
 
-func (r *Runtime) fnJsonStringify(call goja.FunctionCall) goja.Value {
+func (r *Runtime) fnJsonEncode(call goja.FunctionCall) goja.Value {
 	v := call.Arguments[0].Export()
 	b, err := json.Marshal(v)
 	check(err)
 	return r.runtime.ToValue(string(b))
+}
+
+func (r *Runtime) fnBase64Decode(call goja.FunctionCall) goja.Value {
+	a := call.Arguments[0].Export().(string)
+	b, err := base64.StdEncoding.DecodeString(a)
+	checkR(r.runtime, err)
+	return r.runtime.ToValue(string(b))
+}
+
+func (r *Runtime) fnBase64Encode(call goja.FunctionCall) goja.Value {
+	a := call.Arguments[0].Export().(string)
+	return r.runtime.ToValue(base64.StdEncoding.EncodeToString([]byte(a)))
 }
 
 func (r *Runtime) fnCryptoHash(call goja.FunctionCall) goja.Value {
@@ -434,26 +372,31 @@ func (r *Runtime) fnJwtVerify(call goja.FunctionCall) goja.Value {
 	secret := call.Arguments[0].Export().(string)
 	token := call.Arguments[1].Export().(string)
 	if token == "" {
-		panic(errors.New("jwtVerify: no token"))
+		//r.runtime.Interrupt("jwtVerify: no token")
+		return goja.Undefined()
 	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		panic(errors.New("jwtVerify: invalid token, need 3 parts"))
+		//r.runtime.Interrupt("jwtVerify: invalid token, need 3 parts")
+		return goja.Undefined()
 	}
 	sig := hmac.New(sha256.New, []byte(secret))
 	sig.Write([]byte(parts[0] + "." + parts[1]))
 	signature := stringToBase64(string(sig.Sum(nil)))
 	if parts[2] != signature {
-		panic(errors.New("jwtVerify: signature mismatch"))
+		//r.runtime.Interrupt("jwtVerify: signature mismatch")
+		return goja.Undefined()
 	}
 	payload := M{}
 	err := json.Unmarshal([]byte(base64ToString(parts[1])), &payload)
 	if err != nil {
-		panic(errors.New("jwtVerify: can't parse payload: " + err.Error()))
+		//r.runtime.Interrupt("jwtVerify: can't parse payload: " + err.Error())
+		return goja.Undefined()
 	}
 	expiry := int64(payload["exp"].(float64))
 	if time.Now().UTC().Unix() >= expiry {
-		panic(errors.New("jwtVerify: expired"))
+		//r.runtime.Interrupt("jwtVerify: expired")
+		return goja.Undefined()
 	}
 	return r.runtime.ToValue(payload)
 }
@@ -470,6 +413,14 @@ func (r *Runtime) fnDbQuery(call goja.FunctionCall) goja.Value {
 		return goja.Undefined()
 	}
 	return r.runtime.ToValue(results)
+}
+
+func (r *Runtime) fnClearCache(call goja.FunctionCall) goja.Value {
+	slug := call.Arguments[0].Export().(string)
+	projectsLock.Lock()
+	delete(projects, slug)
+	projectsLock.Unlock()
+	return goja.Undefined()
 }
 
 func dbInstance(projectId string) *sql.DB {
@@ -573,7 +524,13 @@ func templateToCode(t string) string {
 	return code
 }
 
-func check(err error) {
+func checkR(rt *goja.Runtime, err interface{}) {
+	if err != nil {
+		panic(rt.ToValue(fmt.Sprintf("error: %v", err)))
+	}
+}
+
+func check(err interface{}) {
 	if err != nil {
 		panic(err)
 	}
