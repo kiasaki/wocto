@@ -1,450 +1,182 @@
 package main
 
 import (
-	"crypto/hmac"
+	"bufio"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
-	_ "embed"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"html/template"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/dop251/goja"
 	_ "github.com/mattn/go-sqlite3"
-	"golang.org/x/crypto/bcrypt"
 )
 
-//go:embed app.php
-var appCode string
-
-type M = map[string]interface{}
-
 type Project struct {
-	ID    string
-	Slug  string
-	Pages []M
+	Slug   string
+	Domain string
+	Env    map[string]interface{}
 }
-
-var databasesLock = &sync.RWMutex{}
-var databases = map[string]*sql.DB{}
 
 var projectsLock = &sync.RWMutex{}
 var projects = map[string]*Project{}
 
+var db *sql.DB
+
 func main() {
-	projects[""] = &Project{ID: "1", Pages: []M{
-		M{"name": "404", "content": appCode}}}
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	if len(os.Args) >= 2 && os.Args[1] == "repl" {
+		startRepl()
+		return
 	}
-	log.Println("Starting on port " + port)
-	log.Fatal(http.ListenAndServe(":"+port, http.HandlerFunc(handler)))
+	var err error
+	db, err = sql.Open("sqlite3", "db.sqlite3")
+	check(err)
+	dbQuery("create table if not exists projects (slug, domain, env)")
+	db.SetMaxOpenConns(1)
+	log.Println("Starting on port " + env("PORT", "8080"))
+	log.Fatal(http.ListenAndServe(":"+env("PORT", "8080"), http.HandlerFunc(handler)))
+}
+
+func startRepl() {
+	env := map[string]interface{}{}
+	eval(env, parse(stdlib))
+	reader := bufio.NewReader(os.Stdin)
+	repl := func() {
+		for {
+			fmt.Print("> ")
+			line, _, err := reader.ReadLine()
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+			fmt.Println(print(eval(env, parse(string(line)))))
+		}
+	}
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Printf("error: %v\n", err)
+			repl()
+		}
+	}()
+	repl()
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if err := recover(); err != nil {
-			if e, ok := err.(string); ok && e == "request end" {
-				return
-			}
-			log.Println("panic: ", err)
+			log.Printf("panic: %v\n", err)
 			log.Println(string(debug.Stack()))
 			w.WriteHeader(500)
-			fmt.Fprintf(w, "panic: %v\n", err)
+			fmt.Fprintf(w, "error: %v\n", err)
 		}
 	}()
-
-	db := dbInstance("1")
 	projectSlug := ""
-
-	if !strings.HasPrefix(r.Host, "wocto.atriumph") {
-		projectsByDomain, err := dbQuery(db, "select slug from projects where domain = ?", r.Host)
-		check(err)
-		if len(projectsByDomain) > 0 {
-			projectSlug = projectsByDomain[0]["slug"].(string)
-		}
+	projectsByDomain, err := dbQuery("select slug from projects where domain = ?", r.Host)
+	check(err)
+	if len(projectsByDomain) > 0 {
+		projectSlug = projectsByDomain[0]["slug"].(string)
 	}
-
 	if projectSlug == "" {
 		hostParts := strings.Split(r.Host, ".")
 		if len(hostParts) >= 3 {
-			if hostParts[len(hostParts)-3] != "wocto" && hostParts[len(hostParts)-2] == "atriumph" {
-				projectSlug = hostParts[len(hostParts)-3]
-			}
+			projectSlug = hostParts[len(hostParts)-3]
 		}
 	}
-
 	projectsLock.RLock()
 	project, ok := projects[projectSlug]
 	projectsLock.RUnlock()
 	if !ok {
-		matchingProjects, err := dbQuery(db,
-			"select * from projects where slug = ?", projectSlug)
+		matchingProjects, err := dbQuery("select * from projects where slug = ?", projectSlug)
 		check(err)
 		if len(matchingProjects) != 1 {
-			w.WriteHeader(404)
-			w.Write([]byte(`Project Not Found`))
-			return
+			dbQuery("insert into projects values (?,?,?)", projectSlug, "", "{}")
+			matchingProjects = []map[string]interface{}{{"slug": projectSlug, "domain": "", "env": "{}"}}
 		}
+		var e map[string]interface{}
+		check(json.Unmarshal([]byte(matchingProjects[0]["env"].(string)), &e))
 		project = &Project{
-			ID:   matchingProjects[0]["id"].(string),
-			Slug: matchingProjects[0]["slug"].(string),
+			Slug:   matchingProjects[0]["slug"].(string),
+			Domain: matchingProjects[0]["domain"].(string),
+			Env:    e,
 		}
-		pages, err := dbQuery(db, "select * from pages where project_id = ?", project.ID)
-		check(err)
-		project.Pages = pages
 		projectsLock.Lock()
 		projects[projectSlug] = project
 		projectsLock.Unlock()
 	}
 
-	currentPath := r.URL.Path[1:]
-	found := false
-	rt := NewRuntime(project.ID, project.Pages, r, w)
-	execute := func(page M) {
-		t := templateToCode(page["content"].(string))
-		_, err := rt.runtime.RunScript(page["name"].(string), t)
-		if err != nil {
-			if strings.Contains(err.Error(), "request end") {
-				return
-			}
-			w.WriteHeader(500)
-			fmt.Fprintf(w, "Error executing page: %v\n", err)
-			for i, l := range strings.Split(t, "\n") {
-				fmt.Fprintf(w, "%3d|%s\n", i+1, l)
-			}
-			panic("request end")
+	if r.URL.Path == "/repl" {
+		a := r.Header.Get("Authorization")
+		aa := "Basic " + base64.StdEncoding.EncodeToString([]byte("op:"+env("SECRET", "herpderp")))
+		if a != aa {
+			w.Header().Set("WWW-Authenticate", "Basic realm=\"Login\"")
+			w.WriteHeader(401)
+			return
 		}
-	}
-	for _, page := range project.Pages {
-		pathRegexp := pagePathToRegexp(page["name"].(string))
-		if pathRegexp.MatchString(currentPath) {
-			values := matchNamed(pathRegexp, currentPath)
-			for k, v := range values {
-				r.URL.Query().Set(k, v)
-			}
-			execute(page)
-			found = true
-			break
+		if r.Method == "POST" {
 		}
+		w.Write([]byte(replHtml))
+		return
 	}
 
-	if !found {
-		for _, page := range project.Pages {
-			if page["name"].(string) == "404" {
-				execute(page)
-				found = true
-				break
-			}
-		}
-	}
-	if !found {
-		rt.out = "Page Not Found"
-	}
-
-	if w.Header().Get("Content-Type") == "" {
-		if strings.HasSuffix(r.URL.Path, ".css") {
-			w.Header().Set("Content-Type", "text/css")
-		} else if strings.HasSuffix(r.URL.Path, ".js") {
-			w.Header().Set("Content-Type", "application/javascript")
-		} else {
-			w.Header().Set("Content-Type", "text/html")
-		}
-	}
-	if rt.code != 0 {
-		w.WriteHeader(rt.code)
-	}
-	w.Write([]byte(rt.out))
-}
-
-type Runtime struct {
-	projectId string
-	pages     []M
-	r         *http.Request
-	w         http.ResponseWriter
-	db        *sql.DB
-	code      int
-	out       string
-	runtime   *goja.Runtime
-}
-
-func NewRuntime(projectId string, pages []M, r *http.Request, w http.ResponseWriter) *Runtime {
-	rt := goja.New()
-	runtime := &Runtime{projectId: projectId, pages: pages, r: r, w: w, runtime: rt}
-	runtime.db = dbInstance(projectId)
-	global := rt.GlobalObject()
-	if projectId == "1" {
-		global.Set("__secret", rt.ToValue(os.Getenv("SECRET")))
-	}
-	global.Set("path", rt.ToValue(r.URL.Path))
-	global.Set("method", rt.ToValue(r.Method))
-	global.Set("include", runtime.fnInclude)
-	global.Set("uuid", runtime.fnUuid)
-	global.Set("param", runtime.fnParam)
-	global.Set("sanitize", runtime.fnSanitize)
-	global.Set("write", runtime.fnWrite)
-	global.Set("redirect", runtime.fnRedirect)
-	global.Set("end", runtime.fnEnd)
-	global.Set("body", runtime.fnBody)
-	global.Set("responseCode", runtime.fnResponseCode)
-	global.Set("headersGet", runtime.fnHeadersGet)
-	global.Set("headersSet", runtime.fnHeadersSet)
-	global.Set("cookiesGet", runtime.fnCookiesGet)
-	global.Set("cookiesSet", runtime.fnCookiesSet)
-	global.Set("jsonDecode", runtime.fnJsonDecode)
-	global.Set("jsonEncode", runtime.fnJsonEncode)
-	global.Set("base64Decode", runtime.fnBase64Decode)
-	global.Set("base64Encode", runtime.fnBase64Encode)
-	global.Set("cryptoHash", runtime.fnCryptoHash)
-	global.Set("cryptoCompare", runtime.fnCryptoCompare)
-	global.Set("jwtSign", runtime.fnJwtSign)
-	global.Set("jwtVerify", runtime.fnJwtVerify)
-	global.Set("dbQuery", runtime.fnDbQuery)
-	global.Set("__clearCache", runtime.fnClearCache)
-	return runtime
-}
-
-func (r *Runtime) fnInclude(call goja.FunctionCall) goja.Value {
-	name := call.Arguments[0].Export().(string)
-	for _, p := range r.pages {
-		if p["name"].(string) == name {
-			_, err := r.runtime.RunScript(name, templateToCode(p["content"].(string)))
-			if err != nil {
-				r.runtime.Interrupt(err)
-			}
-			return goja.Undefined()
-		}
-	}
-	r.runtime.Interrupt(errors.New("include: page '" + name + "' not found"))
-	return goja.Undefined()
-}
-
-func (r *Runtime) fnUuid(call goja.FunctionCall) goja.Value {
-	return r.runtime.ToValue(uuid())
-}
-
-func (r *Runtime) fnParam(call goja.FunctionCall) goja.Value {
-	name := call.Arguments[0].Export().(string)
-	return r.runtime.ToValue(r.r.FormValue(name))
-}
-
-func (r *Runtime) fnSanitize(call goja.FunctionCall) goja.Value {
-	value := call.Arguments[0].Export().(string)
-	return r.runtime.ToValue(template.HTMLEscapeString(value))
-}
-
-func (r *Runtime) fnWrite(call goja.FunctionCall) goja.Value {
-	r.out += call.Arguments[0].Export().(string)
-	return goja.Undefined()
-}
-
-func (r *Runtime) fnRedirect(call goja.FunctionCall) goja.Value {
-	path := call.Arguments[0].Export().(string)
-	http.Redirect(r.w, r.r, path, 302)
-	r.runtime.Interrupt(errors.New("request end"))
-	return goja.Undefined()
-}
-
-func (r *Runtime) fnEnd(call goja.FunctionCall) goja.Value {
-	r.runtime.Interrupt(errors.New("request end"))
-	return goja.Undefined()
-}
-
-func (r *Runtime) fnBody(call goja.FunctionCall) goja.Value {
-	defer r.r.Body.Close()
-	b, err := ioutil.ReadAll(r.r.Body)
-	checkR(r.runtime, err)
-	return r.runtime.ToValue(string(b))
-}
-
-func (r *Runtime) fnResponseCode(call goja.FunctionCall) goja.Value {
-	code := int(call.Arguments[0].ToInteger())
-	r.code = code
-	return goja.Undefined()
-}
-
-func (r *Runtime) fnHeadersGet(call goja.FunctionCall) goja.Value {
-	name := call.Arguments[0].Export().(string)
-	return r.runtime.ToValue(r.r.Header.Get(name))
-}
-
-func (r *Runtime) fnHeadersSet(call goja.FunctionCall) goja.Value {
-	name := call.Arguments[0].Export().(string)
-	value := call.Arguments[1].Export().(string)
-	r.w.Header().Set(name, value)
-	return goja.Undefined()
-}
-
-func (r *Runtime) fnCookiesGet(call goja.FunctionCall) goja.Value {
-	name := call.Arguments[0].Export().(string)
-	if cookie, err := r.r.Cookie(name); err == nil {
-		return r.runtime.ToValue(cookie.Value)
-	}
-	return goja.Undefined()
-}
-
-func (r *Runtime) fnCookiesSet(call goja.FunctionCall) goja.Value {
-	name := call.Arguments[0].Export().(string)
-	value := call.Arguments[1].Export().(string)
-	http.SetCookie(r.w, &http.Cookie{
-		Name:     name,
-		Value:    value,
-		HttpOnly: true,
-		Path:     "/",
-		MaxAge:   2147483647,
-	})
-	return goja.Undefined()
-}
-
-func (r *Runtime) fnJsonDecode(call goja.FunctionCall) goja.Value {
-	t := call.Arguments[0].Export().(string)
-	var v interface{}
-	check(json.Unmarshal([]byte(t), &v))
-	return r.runtime.ToValue(v)
-}
-
-func (r *Runtime) fnJsonEncode(call goja.FunctionCall) goja.Value {
-	v := call.Arguments[0].Export()
-	b, err := json.Marshal(v)
+	body, err := ioutil.ReadAll(r.Body)
 	check(err)
-	return r.runtime.ToValue(string(b))
-}
-
-func (r *Runtime) fnBase64Decode(call goja.FunctionCall) goja.Value {
-	a := call.Arguments[0].Export().(string)
-	b, err := base64.StdEncoding.DecodeString(a)
-	checkR(r.runtime, err)
-	return r.runtime.ToValue(string(b))
-}
-
-func (r *Runtime) fnBase64Encode(call goja.FunctionCall) goja.Value {
-	a := call.Arguments[0].Export().(string)
-	return r.runtime.ToValue(base64.StdEncoding.EncodeToString([]byte(a)))
-}
-
-func (r *Runtime) fnCryptoHash(call goja.FunctionCall) goja.Value {
-	password := call.Arguments[0].Export().(string)
-	b, err := bcrypt.GenerateFromPassword([]byte(password), 13)
-	check(err)
-	return r.runtime.ToValue(string(b))
-}
-
-func (r *Runtime) fnCryptoCompare(call goja.FunctionCall) goja.Value {
-	hash := []byte(call.Arguments[0].Export().(string))
-	password := []byte(call.Arguments[1].Export().(string))
-	return r.runtime.ToValue(bcrypt.CompareHashAndPassword(hash, password) == nil)
-}
-
-func (r *Runtime) fnJwtSign(call goja.FunctionCall) goja.Value {
-	secret := call.Arguments[0].Export().(string)
-	payloadRaw := call.Arguments[1].Export()
-	mins := int(call.Arguments[2].ToInteger())
-	t := time.Now().UTC().Add(time.Duration(mins) * time.Minute).Unix()
-	payload, ok := payloadRaw.(map[string]interface{})
-	if !ok {
-		panic(errors.New("jwtSign: payload not a table"))
+	r.Body.Close()
+	valuesToMap := func(mm map[string][]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range mm {
+			m[k] = strings.Join(v, ",")
+		}
+		return m
 	}
-	payload["exp"] = t
-	payloadBs, err := json.Marshal(payload)
-	check(err)
-	message := stringToBase64(`{"alg":"HS256","typ":"JWT"}`) + "." + stringToBase64(string(payloadBs))
-	sig := hmac.New(sha256.New, []byte(secret))
-	sig.Write([]byte(message))
-	token := message + "." + stringToBase64(string(sig.Sum(nil)))
-	return r.runtime.ToValue(token)
-}
-
-func (r *Runtime) fnJwtVerify(call goja.FunctionCall) goja.Value {
-	secret := call.Arguments[0].Export().(string)
-	token := call.Arguments[1].Export().(string)
-	if token == "" {
-		//r.runtime.Interrupt("jwtVerify: no token")
-		return goja.Undefined()
+	r.ParseForm()
+	headers := valuesToMap(r.Header)
+	query := valuesToMap(r.URL.Query())
+	form := valuesToMap(r.Form)
+	request := map[string]interface{}{
+		"method":  r.Method,
+		"host":    r.Host,
+		"path":    r.URL.Path,
+		"headers": headers,
+		"query":   query,
+		"form":    form,
+		"body":    string(body),
 	}
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		//r.runtime.Interrupt("jwtVerify: invalid token, need 3 parts")
-		return goja.Undefined()
-	}
-	sig := hmac.New(sha256.New, []byte(secret))
-	sig.Write([]byte(parts[0] + "." + parts[1]))
-	signature := stringToBase64(string(sig.Sum(nil)))
-	if parts[2] != signature {
-		//r.runtime.Interrupt("jwtVerify: signature mismatch")
-		return goja.Undefined()
-	}
-	payload := M{}
-	err := json.Unmarshal([]byte(base64ToString(parts[1])), &payload)
-	if err != nil {
-		//r.runtime.Interrupt("jwtVerify: can't parse payload: " + err.Error())
-		return goja.Undefined()
-	}
-	expiry := int64(payload["exp"].(float64))
-	if time.Now().UTC().Unix() >= expiry {
-		//r.runtime.Interrupt("jwtVerify: expired")
-		return goja.Undefined()
-	}
-	return r.runtime.ToValue(payload)
-}
-
-func (r *Runtime) fnDbQuery(call goja.FunctionCall) goja.Value {
-	sql := call.Arguments[0].Export().(string)
-	args := []interface{}{}
-	for _, a := range call.Arguments[1:] {
-		args = append(args, a.Export())
-	}
-	results, err := dbQuery(r.db, sql, args...)
-	if err != nil {
-		r.runtime.Interrupt(err)
-		return goja.Undefined()
-	}
-	return r.runtime.ToValue(results)
-}
-
-func (r *Runtime) fnClearCache(call goja.FunctionCall) goja.Value {
-	slug := call.Arguments[0].Export().(string)
 	projectsLock.Lock()
-	delete(projects, slug)
-	projectsLock.Unlock()
-	return goja.Undefined()
-}
-
-func dbInstance(projectId string) *sql.DB {
-	databasesLock.RLock()
-	db, ok := databases[projectId]
-	databasesLock.RUnlock()
-	if ok {
-		return db
+	defer projectsLock.Unlock()
+	response := eval(project.Env, []interface{}{"main", request})
+	if response, ok := response.(map[string]interface{}); ok {
+		if v, ok := response["headers"].(map[string]interface{}); ok {
+			for k, v := range v {
+				w.Header().Set(k, fmt.Sprintf("%v", v))
+			}
+		}
+		if v, ok := response["status"].(int64); ok {
+			w.WriteHeader(int(v))
+		}
+		if v, ok := response["body"].(string); ok {
+			w.Write([]byte(v))
+		} else {
+			bs, err := json.Marshal(response["body"])
+			check(err)
+			w.Write(bs)
+		}
 	}
-	db, err := sql.Open("sqlite3", "data/db/"+projectId+".sqlite3")
-	check(err)
-	db.SetMaxOpenConns(1)
-	databasesLock.Lock()
-	databases[projectId] = db
-	databasesLock.Unlock()
-	return db
+	dbQuery("update projects set env = ? where slug = ?", print(project.Env), project.Slug)
 }
 
-func dbQuery(db *sql.DB, sql string, args ...interface{}) ([]M, error) {
+func dbQuery(sql string, args ...interface{}) ([]map[string]interface{}, error) {
 	rows, err := db.Query(sql, args...)
 	if err != nil {
 		return nil, err
 	}
-	results := []M{}
+	results := []map[string]interface{}{}
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, err
@@ -460,7 +192,7 @@ func dbQuery(db *sql.DB, sql string, args ...interface{}) ([]M, error) {
 			return nil, err
 		}
 
-		result := M{}
+		result := map[string]interface{}{}
 		for i, column := range columns {
 			result[column] = *(values[i].(*interface{}))
 		}
@@ -469,87 +201,350 @@ func dbQuery(db *sql.DB, sql string, args ...interface{}) ([]M, error) {
 	return results, err
 }
 
-var pathReplaceRegexp = regexp.MustCompile("/:([a-zA-Z0-9]+)")
-
-func pagePathToRegexp(path string) *regexp.Regexp {
-	pathStrRegexp := pathReplaceRegexp.ReplaceAllStringFunc(path, func(s string) string {
-		return "(?P<" + s[2:] + ">[^/]+)"
-	})
-	return regexp.MustCompile("^" + pathStrRegexp + "$")
-}
-
-func matchNamed(r *regexp.Regexp, str string) map[string]string {
-	match := r.FindStringSubmatch(str)
-	if len(match) == 0 {
-		return nil
-	}
-	results := map[string]string{}
-	for i, val := range match {
-		if r.SubexpNames()[i] == "" {
-			continue
-		}
-		results[r.SubexpNames()[i]] = val
-	}
-	return results
-}
-
-func templateToCode(t string) string {
-	code := ""
-	lastI := 0
-	inCode := false
-	inOutput := false
-	for i, c := range t {
-		if i > 0 && t[i-1] == '<' && c == '?' {
-			code += `write(` + strconv.Quote(t[lastI:i-1]) + ")\n"
-			lastI = i + 1
-			inOutput = true
-		}
-		if inOutput && t[i-1] == '?' && c == '>' {
-			code += `write(sanitize(` + t[lastI:i-1] + "))\n"
-			lastI = i + 1
-			inOutput = false
-		}
-		if c == '%' && i > 0 && t[i-1] == '<' {
-			code += `write(` + strconv.Quote(t[lastI:i-1]) + ")\n"
-			lastI = i + 1
-			inCode = true
-		}
-		if inCode && c == '>' && t[i-1] == '%' {
-			code += t[lastI:i-1] + "\n"
-			lastI = i + 1
-			inCode = false
-		}
-	}
-	code += `write(` + strconv.Quote(t[lastI:]) + ")\n"
-	return code
-}
-
-func checkR(rt *goja.Runtime, err interface{}) {
-	if err != nil {
-		panic(rt.ToValue(fmt.Sprintf("error: %v", err)))
-	}
-}
-
 func check(err interface{}) {
 	if err != nil {
 		panic(err)
 	}
 }
 
+func env(name, alt string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return alt
+}
+
 func uuid() string {
 	b := make([]byte, 16)
 	_, err := rand.Read(b)
 	check(err)
-	return fmt.Sprintf("%X-%X-%X-%X-%X", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
-func stringToBase64(s string) string {
-	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(s))
-}
+// lang
 
-func base64ToString(b string) string {
-	if s, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(b); err == nil {
-		return string(s)
+func parse(s string) interface{} {
+	symbolRunes := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+*/-_!=<>"
+	pos := -1
+	i := []interface{}{}
+	a := []int{}
+	lastAPos := 0
+	next := func() byte {
+		pos++
+		if pos >= len(s) {
+			return 0
+		}
+		return s[pos]
 	}
-	return ""
+	for {
+		start := pos + 1
+		switch c := next(); {
+		case c == 0:
+			if len(a) > 0 {
+				panic(fmt.Sprintf("unclosed parens starting at position %d", lastAPos))
+			}
+			if len(i) == 0 {
+				return nil
+			}
+			if len(i) == 1 {
+				return i[0]
+			}
+			return []interface{}{append([]interface{}{"fn", nil}, i...)}
+		case strings.ContainsRune(" \t\n\r", rune(c)):
+			// ignore
+		case c == '(':
+			lastAPos = pos
+			a = append(a, len(i))
+		case c == ')':
+			if len(a) == 0 {
+				panic(fmt.Sprintf("unexpected extra closing parens at position %d", pos))
+			}
+			start := a[len(a)-1]
+			l := append([]interface{}{}, i[start:]...)
+			if len(l) == 0 {
+				i = append(i[0:start], nil)
+			} else {
+				i = append(i[0:start], l)
+			}
+			a = a[:len(a)-1]
+		case (c >= '0' && c <= '9') || c == '-':
+			for c = next(); c >= '0' && c <= '9'; c = next() {
+			}
+			n, err := strconv.ParseInt(s[start:pos], 10, 64)
+			check(err)
+			i = append(i, n)
+			pos--
+		case strings.ContainsRune(symbolRunes, rune(c)):
+			for c = next(); strings.ContainsRune(symbolRunes, rune(c)); c = next() {
+			}
+			i = append(i, s[start:pos])
+			pos--
+		default:
+			panic(fmt.Sprintf("unexpected character at position %d", pos))
+		}
+	}
 }
+
+func eval(env map[string]interface{}, a interface{}) interface{} {
+	switch b := a.(type) {
+	case nil:
+		return a
+	case int64:
+		return a
+	case string:
+		if c, ok := envGet(env, b); ok {
+			return c
+		}
+		panic(fmt.Sprintf("eval: no '%s' in env", b))
+	case []interface{}:
+		if bi, ok := b[0].(string); ok {
+			switch bi {
+			case "+":
+				values := mustArgs("+", env, b[1:], "number", "number")
+				return mustNumber(values[0]) + mustNumber(values[1])
+			case "-":
+				values := mustArgs("-", env, b[1:], "number", "number")
+				return mustNumber(values[0]) - mustNumber(values[1])
+			case "quote":
+				return b[1]
+			case "def":
+				values := mustArgs("def", env, b[2:], "string")
+				env[mustString(b[1])] = values[0]
+				return values[0]
+			case "fn":
+				mustList(b[1])
+				return append([]interface{}{env}, b[1:]...)
+			case "cond":
+				for _, c := range b[1:] {
+					cc := mustList(c)
+					if eval(env, cc[0]) != nil {
+						return eval(env, cc[1])
+					}
+				}
+				return nil
+			case "eq":
+				values := mustArgs("eq", env, b[1:])
+				if print(values[0]) == print(values[1]) {
+					return "t"
+				}
+				return nil
+			case "type":
+				v := eval(env, b[1])
+				switch v.(type) {
+				case nil:
+					return "list"
+				case int64:
+					return "number"
+				case string:
+					return "symbol"
+				case []interface{}:
+					return "list"
+				case map[string]interface{}:
+					return "env"
+				}
+			case "list":
+				return mustArgs("list", env, b[1:])
+			case "concat":
+				values := mustArgs("concat", env, b[1:])
+				d := []interface{}{}
+				for _, v := range values {
+					if vv, ok := v.([]interface{}); ok {
+						d = append(d, vv...)
+					} else {
+						d = append(d, v)
+					}
+				}
+				return d
+			case "nth":
+				values := mustArgs("nth", env, b[1:], "list", "number")
+				l := mustList(values[0])
+				n := int(mustNumber(values[1]))
+				if n >= len(l) {
+					if len(values) >= 3 {
+						return values[2]
+					} else {
+						return nil
+					}
+				}
+				return l[n]
+			default:
+			}
+		}
+		fnRaw := eval(env, b[0])
+		fn, ok := fnRaw.([]interface{})
+		if !ok {
+			panic(fmt.Sprintf("eval: call to non fn: %v", fnRaw))
+		}
+		fnDefEnv, ok := fn[0].(map[string]interface{})
+		if !ok {
+			panic(fmt.Sprintf("eval: call to non fn (env): %v", fn))
+		}
+		argNames, ok := fn[1].([]interface{})
+		if fn[1] != nil && !ok {
+			panic(fmt.Sprintf("eval: call to non fn (args): %v", fn))
+		}
+		fnEnv := map[string]interface{}{"*up*": fnDefEnv}
+		args := []interface{}{}
+		for _, c := range b[1:] {
+			args = append(args, eval(env, c))
+		}
+		if argNames == nil {
+			fnEnv["args"] = args
+		} else {
+			for i, a := range argNames {
+				b := mustString(a)
+				fnEnv[b] = args[i]
+			}
+		}
+		var d interface{}
+		for _, e := range fn[2:] {
+			d = eval(fnEnv, e)
+		}
+		return d
+	default:
+		panic(fmt.Sprintf("eval: unknown value type: %T %v", a, a))
+	}
+}
+
+func print(a interface{}) string {
+	switch b := a.(type) {
+	case nil:
+		return "()"
+	case int64:
+		return fmt.Sprintf("%d", b)
+	case string:
+		return b
+	case []interface{}:
+		cs := []string{}
+		for _, c := range b {
+			cs = append(cs, print(c))
+		}
+		return "(" + strings.Join(cs, " ") + ")"
+	case map[string]interface{}:
+		return fmt.Sprintf("<env %p>", b)
+	default:
+		panic(fmt.Sprintf("print: unknown value type: %v", a))
+	}
+}
+
+func envGet(env map[string]interface{}, name string) (interface{}, bool) {
+	if a, ok := env[name]; ok {
+		return a, true
+	}
+	if p, ok := env["*up*"]; ok {
+		if pp, ok := p.(map[string]interface{}); ok {
+			return envGet(pp, name)
+		}
+	}
+	return nil, false
+}
+
+func mustNumber(a interface{}) int64 {
+	if b, ok := a.(int64); ok {
+		return b
+	}
+	panic(fmt.Sprintf("expected number got '%v'", a))
+}
+
+func mustString(a interface{}) string {
+	if b, ok := a.(string); ok {
+		return b
+	}
+	panic(fmt.Sprintf("expected string got '%v'", a))
+}
+
+func mustList(a interface{}) []interface{} {
+	if a == nil {
+		return nil
+	}
+	if b, ok := a.([]interface{}); ok {
+		return b
+	}
+	panic(fmt.Sprintf("expected list got '%v'", a))
+}
+
+func mustArgs(name string, env map[string]interface{}, args []interface{}, argTypes ...string) []interface{} {
+	values := []interface{}{}
+	for _, a := range args {
+		values = append(values, eval(env, a))
+	}
+	for i, at := range argTypes {
+		if at == "number" {
+			if _, ok := values[i].(int64); !ok {
+				panic(fmt.Sprintf("%s: expected arg %d to be %s, got: %v", name, i+1, at, values[i]))
+			}
+		}
+		if at == "list" {
+			if _, ok := values[i].([]interface{}); !ok {
+				panic(fmt.Sprintf("%s: expected arg %d to be %s, got: %v", name, i+1, at, values[i]))
+			}
+		}
+	}
+	return values
+}
+
+const stdlib = `
+(def t (quote t))
+(def nil ())
+
+(def car (fn (a) (nth 0 a)))
+(def cdr (fn (a) (slice 1 0 a)))
+(def cons (fn (a b) (concat a b)))
+
+`
+
+const replHtml = `
+<!doctype html>
+<meta charset=utf8>
+<title>repl</title>
+<link rel="stylesheet" href="https://unpkg.com/@datavis-tech/codemirror-6-prerelease@5.0.0/codemirror.next/legacy-modes/style/codemirror.css">
+<script src="https://unpkg.com/@datavis-tech/codemirror-6-prerelease@5.0.0/dist/codemirror.js"></script>
+<style>
+body { margin: 0; }
+.codemirror { height: 100vh; overflow: auto; }
+.codemirror-matching-bracket { background: rgba(0,200,0,0.33); }
+.codemirror-nonmatching-bracket { background: rgba(0,0,200,0.33); }
+</style>
+<div id=editor></div>
+<script>
+  let {
+    EditorState,
+    EditorView,
+    keymap,
+    history,
+    redo,
+    redoSelection,
+    undo,
+    undoSelection,
+    lineNumbers,
+    baseKeymap,
+    indentSelection,
+    legacyMode,
+    legacyModes: { javascript },
+    matchBrackets,
+    specialChars,
+    multipleSelections
+  } = CodeMirror;
+  let mode = legacyMode({mode: javascript({indentUnit: 2}, {})})
+  let isMac = /Mac/.test(navigator.platform)
+  let state = EditorState.create({doc: "", extensions: [
+    lineNumbers(),
+    history(),
+    specialChars(),
+    multipleSelections(),
+    mode,
+    matchBrackets(),
+    keymap({
+      "Mod-z": undo,
+      "Mod-Shift-z": redo,
+      "Mod-u": view => undoSelection(view) || true,
+      [isMac ? "Mod-Shift-u" : "Alt-u"]: redoSelection,
+      "Ctrl-y": isMac ? undefined : redo,
+      "Shift-Tab": indentSelection
+    }),
+    keymap(baseKeymap),
+  ]})
+  let view = new EditorView({state})
+  document.querySelector("#editor").appendChild(view.dom)
+</script>
+`
