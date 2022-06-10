@@ -148,7 +148,7 @@ if (path === "/projects-view") {
             <div><button type="submit">Save</button></div>
           </hstack>
           <spacer>
-            <textarea name="content" style="height:100%;font-family:monospace;"
+            <textarea name="content" style="height:100%;font-family:monospace;white-space:nowrap;overflow:auto;"
               autofocus><? page.content ?></textarea>
           </spacer>
         </vstack>
@@ -161,15 +161,15 @@ if (path === "/projects-view") {
     </spacer>
   </hstack>
   <script>
-    if (window.location.hostname.includes("atriumph.loc") {
-      let i = document.querySelector("iframe");
-      i.src = i.src.replace("atriumph.com", "atriumph.loc:8080");
-    }
     window.addEventListener("keydown", function(e) {
       if (e.key == "Enter" && e.ctrlKey) {
         document.querySelector("form").submit();
       }
     });
+    if (window.location.hostname.includes("atriumph.loc")) {
+      let i = document.querySelector("iframe");
+      i.src = i.src.replace("atriumph.com", "atriumph.loc:8080");
+    }
   </script>
 <% }
 
