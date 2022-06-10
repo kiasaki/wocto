@@ -3,9 +3,8 @@ module wocto
 go 1.18
 
 require (
-	github.com/Shopify/go-lua v0.0.0-20220120202609-9ab779377807
 	github.com/dop251/goja v0.0.0-20220501172647-e1eca0b61fa9
-	github.com/mattn/go-sqlite3 v1.14.12
+	github.com/lib/pq v1.10.6
 	golang.org/x/crypto v0.0.0-20220427172511-eb4f295cb31f
 )
 

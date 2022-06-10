@@ -37,6 +37,10 @@ Provides:
 - [ ] add creating a new project
 - [ ] support for upload files
 
+### notes
+
+implement aws s3 signing: https://github.com/mclarkson/obdi-aws-ec2lib/blob/f0bbd44643325e7c36a75b376d9635795d79200f/go/src/github.com/goamz/goamz/s3/sign.go
+
 ### license
 
 mit

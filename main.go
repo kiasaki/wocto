@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -68,11 +68,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	db := dbInstance("1")
+	db := dbInstance(env("DATABASE_URL", "postgres://admin:admin@localhost:5432/wocto?sslmode=disable"))
 	projectSlug := ""
 
 	if !strings.HasPrefix(r.Host, "wocto.atriumph") {
-		projectsByDomain, err := dbQuery(db, "select slug from projects where domain = ?", r.Host)
+		projectsByDomain, err := dbQuery(db, "select slug from projects where domain = $1", r.Host)
 		check(err)
 		if len(projectsByDomain) > 0 {
 			projectSlug = projectsByDomain[0]["slug"].(string)
@@ -93,7 +93,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	projectsLock.RUnlock()
 	if !ok {
 		matchingProjects, err := dbQuery(db,
-			"select * from projects where slug = ?", projectSlug)
+			"select * from projects where slug = $1", projectSlug)
 		check(err)
 		if len(matchingProjects) != 1 {
 			w.WriteHeader(404)
@@ -104,7 +104,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			ID:   matchingProjects[0]["id"].(string),
 			Slug: matchingProjects[0]["slug"].(string),
 		}
-		pages, err := dbQuery(db, "select * from pages where project_id = ?", project.ID)
+		pages, err := dbQuery(db, "select * from pages where project_id = $1", project.ID)
 		check(err)
 		project.Pages = pages
 		projectsLock.Lock()
@@ -130,6 +130,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			panic("request end")
 		}
 	}
+
+	for _, page := range project.Pages {
+		if strings.HasPrefix(page["name"].(string), "middleware") {
+			execute(page)
+		}
+	}
+
 	for _, page := range project.Pages {
 		pathRegexp := pagePathToRegexp(page["name"].(string))
 		if pathRegexp.MatchString(currentPath) {
@@ -185,10 +192,10 @@ type Runtime struct {
 func NewRuntime(projectId string, pages []M, r *http.Request, w http.ResponseWriter) *Runtime {
 	rt := goja.New()
 	runtime := &Runtime{projectId: projectId, pages: pages, r: r, w: w, runtime: rt}
-	runtime.db = dbInstance(projectId)
 	global := rt.GlobalObject()
 	if projectId == "1" {
 		global.Set("__secret", rt.ToValue(os.Getenv("SECRET")))
+		runtime.db = dbInstance(env("DATABASE_URL", "postgres://admin:admin@localhost:5432/wocto?sslmode=disable"))
 	}
 	global.Set("path", rt.ToValue(r.URL.Path))
 	global.Set("method", rt.ToValue(r.Method))
@@ -213,6 +220,7 @@ func NewRuntime(projectId string, pages []M, r *http.Request, w http.ResponseWri
 	global.Set("cryptoCompare", runtime.fnCryptoCompare)
 	global.Set("jwtSign", runtime.fnJwtSign)
 	global.Set("jwtVerify", runtime.fnJwtVerify)
+	global.Set("dbSetup", runtime.fnDbSetup)
 	global.Set("dbQuery", runtime.fnDbQuery)
 	global.Set("__clearCache", runtime.fnClearCache)
 	return runtime
@@ -401,7 +409,16 @@ func (r *Runtime) fnJwtVerify(call goja.FunctionCall) goja.Value {
 	return r.runtime.ToValue(payload)
 }
 
+func (r *Runtime) fnDbSetup(call goja.FunctionCall) goja.Value {
+	url := call.Arguments[0].Export().(string)
+	r.db = dbInstance(url)
+	return goja.Undefined()
+}
+
 func (r *Runtime) fnDbQuery(call goja.FunctionCall) goja.Value {
+	if r.db == nil {
+		panic("no database setup")
+	}
 	sql := call.Arguments[0].Export().(string)
 	args := []interface{}{}
 	for _, a := range call.Arguments[1:] {
@@ -423,18 +440,18 @@ func (r *Runtime) fnClearCache(call goja.FunctionCall) goja.Value {
 	return goja.Undefined()
 }
 
-func dbInstance(projectId string) *sql.DB {
+func dbInstance(url string) *sql.DB {
 	databasesLock.RLock()
-	db, ok := databases[projectId]
+	db, ok := databases[url]
 	databasesLock.RUnlock()
 	if ok {
 		return db
 	}
-	db, err := sql.Open("sqlite3", "data/db/"+projectId+".sqlite3")
+	db, err := sql.Open("postgres", url)
 	check(err)
 	db.SetMaxOpenConns(1)
 	databasesLock.Lock()
-	databases[projectId] = db
+	databases[url] = db
 	databasesLock.Unlock()
 	return db
 }
@@ -534,6 +551,13 @@ func check(err interface{}) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func env(name, alt string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return alt
 }
 
 func uuid() string {

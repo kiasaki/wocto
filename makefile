@@ -10,6 +10,19 @@ dev:
 run:
 	go run main.go
 
+db:
+	psql -d $(APP_NAME)
+
+dbsetup:
+	psql -c "CREATE ROLE admin WITH SUPERUSER LOGIN PASSWORD 'admin';" || true
+	psql -c "CREATE DATABASE $(APP_NAME) WITH OWNER admin;" || true
+	psql -d $(APP_NAME) < db.sql || true
+
+dbreset:
+	psql -c "DROP DATABASE $(APP_NAME);" || true
+	psql -c "CREATE DATABASE $(APP_NAME) WITH OWNER admin;" || true
+	psql -d $(APP_NAME) < db.sql || true
+
 ssh:
 	ssh $(SSH_REMOTE)
 
