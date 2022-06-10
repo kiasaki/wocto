@@ -23,13 +23,16 @@ dbreset:
 	psql -c "CREATE DATABASE $(APP_NAME) WITH OWNER admin;" || true
 	psql -d $(APP_NAME) < db.sql || true
 
+deploy:
+	git push https://git.heroku.com/wocto.git main
+
 ssh:
 	ssh $(SSH_REMOTE)
 
 deploy-build:
 	GOOS=linux go build -ldflags "-s -w -extldflags=-static" -installsuffix cgo -tags sqlite_omit_load_extension -o server *.go
 
-deploy: deploy-build
+deploy2: deploy-build
 	scp server $(SSH_REMOTE):/tmp/dtmpl
 	ssh $(SSH_REMOTE) "mv /tmp/dtmpl /home/ubuntu/apps/$(APP_NAME)/server"
 	ssh $(SSH_REMOTE) "sudo systemctl restart $(APP_NAME)"
