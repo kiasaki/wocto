@@ -157,12 +157,15 @@ if (path === "/projects-view") {
     </spacer>
     <spacer style="margin-left:16px;">
       <iframe style="width:100%;height:100%;border:1px solid black;"
-        src="http://<? project.slug ?>.atriumph.loc:8080/<? page ? page.name : '' ?>"></iframe>
+        src="http://<? project.slug ?>.atriumph.com/<? page ? page.name : '' ?>"></iframe>
     </spacer>
   </hstack>
   <script>
+    if (window.location.hostname.includes("atriumph.loc") {
+      let i = document.querySelector("iframe");
+      i.src = i.src.replace("atriumph.com", "atriumph.loc:8080");
+    }
     window.addEventListener("keydown", function(e) {
-      console.log(e);
       if (e.key == "Enter" && e.ctrlKey) {
         document.querySelector("form").submit();
       }
