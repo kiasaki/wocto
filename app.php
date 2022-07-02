@@ -2,12 +2,13 @@
 <style>
 :root { --primary: #8B5CF6; }
 html, body { margin: 0; font-family: sans-serif; font-size: 16px; }
+* { box-sizing: border-box; }
 a { color: var(--primary); }
 container { display: block; max-width: 960px; padding: 16px; margin: 0; }
 container { background: #fff; min-height: 100vh; }
 h1 { margin-top: 0; }
 label { display: block; margin: 0 0 4px; }
-input, textarea { margin: 0 0 16px; padding: 8px 12px; border: 1px solid #111; }
+input, textarea { margin: 0 0 16px; padding: 8px 12px; border: 1px solid #ccc; }
 input, textarea { font-size: 16px; font-family: sans-serif; }
 input:focus, textarea:focus { outline: 0; }
 button, .button { display: inline-block; background: var(--primary); color: #fff; }
@@ -21,13 +22,28 @@ hstack { display: flex; }
 vstack { display: flex; flex-direction: column; }
 spacer { display: block; flex: 1; }
 space { display: inline-block; width: 16px; height: 16px; }
+.hide { display: none; }
+@media (max-width: 768px) {
+  .hide-phone { display: none; }
+  .block-phone { display: block; }
+  .inline-phone { display: inline; }
+}
+.header { display: flex; background: #fff; line-height: 24px; position: fixed; top: 0; left: 0; right: 0; padding: 12px; border-bottom: 1px solid #ccc; z-index: 2; }
+.header a { color: black; text-decoration: none; margin-right: 8px; }
+.header a:hover { color: black; text-decoration: underline; }
+.sidebar { width: 240px; background: #fafafa; position: fixed; left: 0; top: 49px; bottom: 0; border-right: 1px solid #ccc; padding: 16px; }
+container { padding-left: 256px; }
+@media (max-width: 768px) {
+  .sidebar { display: none; }
+  container { padding-left: 16px; }
+}
 </style>
+<script>
+const q = document.querySelector.bind(document);
+const toggle = (x) => q(x).style.display = q(x).style.display == 'none' ? 'inherit' : 'none';
+</script>
 <container>
 <%
-dbQuery("create table if not exists users (id text primary key, username text, password text)")
-dbQuery("create table if not exists projects (id text primary key, name text, slug text, domain text, user_id text)")
-dbQuery("create table if not exists pages (id text primary key, name text, content text, project_id text)")
-
 function eq(a) { return function(b) { return a === b; }; }
 function prop(a) { return function(b) { return b[a]; }; }
 function comp(a, b) { return function(c) { return a(b(c)); }; }
@@ -65,6 +81,7 @@ if (!user) {
   }
 %>
 <form method="post" style="max-width:360px;margin:0;">
+  <h1>Sign in</h1>
   <% if (error) { %><error><? error ?></error><% } %>
   <div>
     <label>Username</label>
@@ -80,17 +97,20 @@ if (!user) {
   end()
 } else {
 %>
-<hstack>
+<div class="header">
+  <a class="hide inline-phone" onclick="toggle('.sidebar')">
+    <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" class="css-i6dzq1"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+  </a>
+  <strong style="margin-right:8px;">W</strong>
   <a href="/">Projects</a>
-  <spacer></spacer>
-  <a href="/profile"><? user.username ?></a>
-</hstack>
-<space></space>
+  <a href="/profile">Profile</a>
+</div>
+<space style="height:48px;"></space>
 <%
 }
 
 if (path === "/logout") {
-  setCookie("token", "")
+  cookiesSet("token", "")
   redirect("/")
 }
 
@@ -127,9 +147,7 @@ if (path === "/projects-view") {
     __clearCache(project.slug)
   }
   %>
-  <style>container { max-width: 100%; }</style>
-  <hstack style="height: calc(100% - 70px);padding-bottom: 16px;">
-    <div style="flex: 0 0 240px">
+  <div class="sidebar">
     <div><a href="/projects-edit?id=<? project.id ?>">- Edit <? project.name ?></a></div>
       <div><a href="/projects-pages-new?id=<? project.id ?>">+ New Page</a></div>
       <%pages.forEach(function(p) {%>
@@ -137,40 +155,68 @@ if (path === "/projects-view") {
           <a href="/projects-view?id=<? project.id ?>&page=<? p.id ?>">/<? p.name ?></a>
         </div>
       <%})%>
-    </div>
-    <spacer>
-      <%if (page) {%>
-      <form method="post" style="height:100%;margin:0;">
-        <vstack style="height:100%">
-          <hstack>
-            <input type="text" name="name" value="<? page.name ?>" />
-            <space></space>
-            <div><button type="submit">Save</button></div>
-          </hstack>
-          <spacer>
-            <textarea name="content" style="height:100%;font-family:monospace;white-space:nowrap;overflow:auto;"
-              autofocus><? page.content ?></textarea>
-          </spacer>
-        </vstack>
-      </form>
-      <%}%>
-    </spacer>
-    <spacer style="margin-left:16px;">
-      <iframe style="width:100%;height:100%;border:1px solid black;"
-        src="http://<? project.slug ?>.atriumph.com/<? page ? page.name : '' ?>"></iframe>
-    </spacer>
-  </hstack>
-  <script>
-    window.addEventListener("keydown", function(e) {
-      if (e.key == "Enter" && e.ctrlKey) {
-        document.querySelector("form").submit();
-      }
-    });
-    if (window.location.hostname.includes("atriumph.loc")) {
-      let i = document.querySelector("iframe");
-      i.src = i.src.replace("atriumph.com", "atriumph.loc:8080");
-    }
-  </script>
+  </div>
+  <%if (page) {%>
+  <form method="post" style="height:calc(100% - 80px);margin:0;">
+    <vstack style="height:100%">
+      <div>
+        <input type="text" name="name" value="<? page.name ?>" />
+      </div>
+      <spacer>
+        <textarea name="content" id="editor" style="height:calc(100% - 120px);font-family:monospace;overflow:auto;"><? page.content ?></textarea>
+      </spacer>
+      <div><button type="submit">Save</button></div>
+    </vstack>
+  </form>
+  <%} else {%>
+  <p>Select a page to edit</p>
+  <%}%>
+<script>
+window.addEventListener("keydown", function(e) {
+  if (e.key == "Enter" && e.ctrlKey) {
+    document.querySelector("form").submit();
+  }
+});
+</script>
+<!--
+<link rel="stylesheet" href="https://unpkg.com/@datavis-tech/codemirror-6-prerelease@5.0.0/codemirror.next/legacy-modes/style/codemirror.css">
+<script src="https://unpkg.com/@datavis-tech/codemirror-6-prerelease@5.0.0/dist/codemirror.js"></script>
+<script>
+let {
+  EditorState, EditorView, keymap, history, redo,
+  redoSelection, undo, undoSelection, lineNumbers,
+  baseKeymap, indentSelection, legacyMode,
+  legacyModes: { javascript },
+  matchBrackets, specialChars, multipleSelections
+} = CodeMirror;
+let mode = legacyMode({mode: javascript({indentUnit: 2}, {})});
+let isMac = /Mac/.test(navigator.platform);
+let extensions = [
+  lineNumbers(),
+  history(),
+  specialChars(),
+  multipleSelections(),
+  mode,
+  matchBrackets(),
+  keymap({
+    "Mod-z": undo,
+    "Mod-Shift-z": redo,
+    "Mod-u": view => undoSelection(view) || true,
+    [isMac ? "Mod-Shift-u" : "Alt-u"]: redoSelection,
+    "Ctrl-y": isMac ? undefined : redo,
+    "Shift-Tab": indentSelection
+  }),
+  keymap(baseKeymap),
+];
+let textarea = document.querySelector("#editor");
+let view = new EditorView({doc: textarea.value, extensions})
+textarea.parentNode.insertBefore(view.dom, textarea)
+textarea.style.display = "none"
+if (textarea.form) textarea.form.addEventListener("submit", () => {
+  textarea.value = view.state.doc.toString()
+})
+</script>
+-->
 <% }
 
 if (path === "/projects-edit") {
